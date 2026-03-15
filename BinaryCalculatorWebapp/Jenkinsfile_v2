@@ -1,14 +1,4 @@
 pipeline {
-
-    environment {
-        PROJECT = credentials('project_id')
-        REPO_PATH = credentials('repo_path')
-        APP_NAME = "binarycalculatorwebapp"
-        IMAGE_TAG = "${REPO_PATH}/${APP_NAME}"
-        CLUSTER = credentials('cluster_name')
-        CLUSTER_ZONE = credentials('cluster_zone')
-    }
-
     agent {
         kubernetes {
             label 'sample-app'
@@ -20,11 +10,11 @@ metadata:
     component: ci
 spec:
   containers:
-  - name: gcloud
-    image: google/cloud-sdk:latest
-    command:
-    - cat
-    tty: true
+    - name: gcloud
+      image: google/cloud-sdk:latest
+      command:
+        - cat
+      tty: true
 """
         }
     }
@@ -33,8 +23,11 @@ spec:
         maven 'maven'
     }
 
-    stages {
+    environment {
+        APP_NAME = 'binarycalculatorwebapp'
+    }
 
+    stages {
         stage('test') {
             steps {
                 sh 'mvn clean test -f ./BinaryCalculatorWebapp/pom.xml'
@@ -50,9 +43,20 @@ spec:
         stage('containerize') {
             steps {
                 container('gcloud') {
-                    dir('BinaryCalculatorWebapp') {
-                        sh 'gcloud config set project $PROJECT'
-                        sh 'gcloud builds submit -t $IMAGE_TAG --suppress-logs'
+                    withCredentials([
+                        file(credentialsId: 'service_account', variable: 'SERVICE_ACCOUNT'),
+                        string(credentialsId: 'project_id', variable: 'PROJECT'),
+                        string(credentialsId: 'repo_path', variable: 'REPO_PATH')
+                    ]) {
+                        dir('BinaryCalculatorWebapp') {
+                            sh '''
+                                cat "$SERVICE_ACCOUNT" | head
+                                gcloud auth activate-service-account --key-file="$SERVICE_ACCOUNT"
+                                gcloud auth list
+                                gcloud config set project "$PROJECT"
+                                gcloud builds submit --tag "$REPO_PATH/$APP_NAME" --suppress-logs .
+                            '''
+                        }
                     }
                 }
             }
@@ -61,17 +65,22 @@ spec:
         stage('deployment') {
             steps {
                 container('gcloud') {
-                    dir('BinaryCalculatorWebapp') {
-                        sh 'gcloud config set project $PROJECT'
-                        sh 'gcloud container clusters get-credentials $CLUSTER --region=$CLUSTER_ZONE'
-                        script {
-                            try {
-                                sh 'kubectl delete deployment binarycalculator-deployment'
-                            } catch (Exception e) {
-                                echo "Deployment not found"
-                            }
+                    withCredentials([
+                        file(credentialsId: 'service_account', variable: 'SERVICE_ACCOUNT'),
+                        string(credentialsId: 'project_id', variable: 'PROJECT'),
+                        string(credentialsId: 'repo_path', variable: 'REPO_PATH'),
+                        string(credentialsId: 'cluster_name', variable: 'CLUSTER'),
+                        string(credentialsId: 'cluster_zone', variable: 'CLUSTER_ZONE')
+                    ]) {
+                        dir('BinaryCalculatorWebapp') {
+                            sh '''
+                                gcloud auth activate-service-account --key-file="$SERVICE_ACCOUNT"
+                                gcloud config set project "$PROJECT"
+                                gcloud container clusters get-credentials "$CLUSTER" --zone "$CLUSTER_ZONE"
+                                kubectl delete deployment binarycalculator-deployment --ignore-not-found=true
+                                kubectl create deployment binarycalculator-deployment --image="$REPO_PATH/$APP_NAME" --port=8080
+                            '''
                         }
-                        sh 'kubectl create deployment binarycalculator-deployment --image $IMAGE_TAG --port=8080'
                     }
                 }
             }
@@ -80,21 +89,24 @@ spec:
         stage('service') {
             steps {
                 container('gcloud') {
-                    dir('BinaryCalculatorWebapp') {
-                        sh 'gcloud config set project $PROJECT'
-                        sh 'gcloud container clusters get-credentials $CLUSTER --region=$CLUSTER_ZONE'
-                        script {
-                            try {
-                                sh 'kubectl expose deployment binarycalculator-deployment --type=LoadBalancer --name=binarycalculator-service'
-                            } catch (Exception e) {
-                                echo "Service already exists"
-                            }
+                    withCredentials([
+                        file(credentialsId: 'service_account', variable: 'SERVICE_ACCOUNT'),
+                        string(credentialsId: 'project_id', variable: 'PROJECT'),
+                        string(credentialsId: 'cluster_name', variable: 'CLUSTER'),
+                        string(credentialsId: 'cluster_zone', variable: 'CLUSTER_ZONE')
+                    ]) {
+                        dir('BinaryCalculatorWebapp') {
+                            sh '''
+                                gcloud auth activate-service-account --key-file="$SERVICE_ACCOUNT"
+                                gcloud config set project "$PROJECT"
+                                gcloud container clusters get-credentials "$CLUSTER" --zone "$CLUSTER_ZONE"
+                                kubectl expose deployment binarycalculator-deployment --type=LoadBalancer --name=binarycalculator-service || true
+                                kubectl get service binarycalculator-service
+                            '''
                         }
-                        sh "kubectl get service binarycalculator-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}'"
                     }
                 }
             }
         }
-
     }
 }
